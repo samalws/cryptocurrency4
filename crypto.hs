@@ -1,5 +1,5 @@
 import Control.Monad.State
-import Control.Monad.Maybe
+import Control.Monad.Trans.Maybe
 
 type Money = Int
 type Score = Money
@@ -10,17 +10,17 @@ data Signed t = Signed { signed :: t, sigs :: [(User, ())] }
 data Txn = Txn { amt :: Money, fee :: Money, from :: User, to :: User, expireTime :: Time }
 data BlockCert = BlockCert { certUser :: User, certAmt :: Score }
 data Block = Block { txns :: [Signed Txn], certs :: [BlockCert], timestamp :: Time, tail :: Signed Block } | GenesisBlock
-data ChainState = ChainState { money :: User -> Money, score :: User -> Score, currTime :: Time, difficulty :: Int }
+data ChainState = ChainState { money :: User -> Money, score :: User -> Score, currTime :: Time, difficulty :: Float }
 
 type ChainMonad = MaybeT (State ChainState)
 
 setMoney :: User -> Money -> ChainState -> ChainState
-setMoney u m s = ChainState f (score s) (currTime s) where
+setMoney u m s = ChainState f (score s) (currTime s) (difficulty s) where
   f uu
     | uu == u = m
     | otherwise = money s uu
 setScore :: User -> Score -> ChainState -> ChainState
-setScore u m s = ChainState (money s) f (currTime s) where
+setScore u m s = ChainState (money s) f (currTime s) (difficulty s) where
   f uu
     | uu == u = m
     | otherwise = score s uu
@@ -39,7 +39,7 @@ getTime :: ChainMonad Time
 getTime = do
   s <- lift get
   return $ currTime s
-getDifficulty :: ChainMonad Int
+getDifficulty :: ChainMonad Float
 getDifficulty = do
   s <- lift get
   return $ difficulty s
@@ -49,6 +49,11 @@ addMoney m u = do
   mm <- getMoney u
   s <- lift get
   put $ setMoney u (m + mm) s
+addScore :: Score -> User -> ChainMonad ()
+addScore m u = do
+  mm <- getScore u
+  s <- lift get
+  put $ setScore u (m + mm) s
 setTime :: Int -> ChainMonad ()
 setTime t = do
   s <- lift get
@@ -68,30 +73,30 @@ checkTxn [u] t = do
   addMoney (-(amt t) - (fee t)) u
   addMoney (amt t) (to t)
   return $ fee t
-checkTxn _ _ = Nothing
+checkTxn _ _ = MaybeT $ return Nothing
 
-checkCert :: [User] -> BlockCert -> ChainMonad (User, Score)
-checkCert [u] c = do
-  guard $ u == (certUser c)
+checkCert :: BlockCert -> ChainMonad (User, Score)
+checkCert c = do
+  u <- return $ certUser c
   s <- getScore u
   guard $ s >= (certAmt c)
   addScore (-(certAmt c)) u
   return $ (certUser c, certAmt c)
-checkCert _ _ = Nothing
 
 checkBlock :: [User] -> Block -> ChainMonad ()
 checkBlock u b = do
-  guard $ u == (map fst $ certs b)
-  txnFees <- sequence $ map checkTxn $ txns b
+  guard $ u == (map certUser $ certs b)
+  txnFees <- sequence $ map (checkSig checkTxn) $ txns b
   txnCerts <- sequence $ map checkCert $ certs b
-  totalScore <- sum $ map snd txnCerts
+  totalScore <- return $ sum $ map snd txnCerts
   t <- getTime
   d <- getDifficulty
-  guard $ (timestamp b - t) < (totalScore / d)
+  guard $ (timestamp b - t) < (round $ fromIntegral totalScore * d)
   setTime $ timestamp b
   snd $ foldr f ((sum txnFees, totalScore), return ()) txnCerts where
-    f ((feesLeft, scoreLeft), m) (usr, scr) = ((feesLeft - amt, scoreLeft - scr), totalScore m >> addMoney usr amt ) where
-      amt = (feesLeft * scr) / scoreLeft
+    f :: (User, Score) -> ((Money, Score), ChainMonad ()) -> ((Money, Score), ChainMonad ())
+    f (usr, scr) ((feesLeft, scoreLeft), m) = ((feesLeft - amt, scoreLeft - scr), m >> addMoney amt usr) where
+      amt = (feesLeft * scr) `div` scoreLeft
   -- adjust difficulty
 
 main = return ()
